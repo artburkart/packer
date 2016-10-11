@@ -2,7 +2,6 @@ package ovf
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	vboxcommon "github.com/mitchellh/packer/builder/virtualbox/common"
@@ -29,6 +28,9 @@ type Config struct {
 
 	BootCommand          []string `mapstructure:"boot_command"`
 	SourcePath           string   `mapstructure:"source_path"`
+	OVAChecksum          string   `mapstructure:"ova_checksum"`
+	OVAChecksumType      string   `mapstructure:"ova_checksum_type"`
+	TargetPath           string   `mapstructure:"ova_target_path"`
 	GuestAdditionsMode   string   `mapstructure:"guest_additions_mode"`
 	GuestAdditionsPath   string   `mapstructure:"guest_additions_path"`
 	GuestAdditionsURL    string   `mapstructure:"guest_additions_url"`
@@ -89,11 +91,6 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 
 	if c.SourcePath == "" {
 		errs = packer.MultiErrorAppend(errs, fmt.Errorf("source_path is required"))
-	} else {
-		if _, err := os.Stat(c.SourcePath); err != nil {
-			errs = packer.MultiErrorAppend(errs,
-				fmt.Errorf("source_path is invalid: %s", err))
-		}
 	}
 
 	validMode := false

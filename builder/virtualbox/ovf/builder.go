@@ -4,6 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"path"
+	"path/filepath"
+	"strings"
 
 	"github.com/mitchellh/multistep"
 	vboxcommon "github.com/mitchellh/packer/builder/virtualbox/common"
@@ -48,6 +51,20 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 	state.Put("hook", hook)
 	state.Put("ui", ui)
 
+	// Convert source path to downloadable url
+	sourcePath, err := common.DownloadableURL(b.config.SourcePath)
+	if err != nil {
+		return nil, fmt.Errorf("Error preparing source_path: %s", err)
+	}
+
+	// Unless already specified, override the targetPath whenever dealing with OVAs
+	extension := filepath.Ext(sourcePath)
+	targetPath := b.config.TargetPath
+	if targetPath == "" && strings.HasSuffix(extension, "ova") {
+		// TODO(arthurb): Figure out a way not to hard-code the packer cache
+		targetPath = filepath.Join("packer_cache", path.Base(sourcePath))
+	}
+
 	// Build the steps.
 	steps := []multistep.Step{
 		&vboxcommon.StepOutputDir{
@@ -69,6 +86,15 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			GuestAdditionsURL:    b.config.GuestAdditionsURL,
 			GuestAdditionsSHA256: b.config.GuestAdditionsSHA256,
 			Ctx:                  b.config.ctx,
+		},
+		&common.StepDownload{
+			Checksum:     b.config.OVAChecksum,
+			ChecksumType: b.config.OVAChecksumType,
+			Description:  strings.ToUpper(extension),
+			Extension:    extension,
+			ResultKey:    "vm_path",
+			TargetPath:   targetPath,
+			Url:          []string{sourcePath},
 		},
 		&StepImport{
 			Name:        b.config.VMName,
