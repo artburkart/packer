@@ -2,6 +2,7 @@ package ovf
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	vboxcommon "github.com/mitchellh/packer/builder/virtualbox/common"
@@ -89,9 +90,23 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 	errs = packer.MultiErrorAppend(errs, c.VBoxManagePostConfig.Prepare(&c.ctx)...)
 	errs = packer.MultiErrorAppend(errs, c.VBoxVersionConfig.Prepare(&c.ctx)...)
 
-	if c.SourcePath == "" {
+	// Get downloadable URL
+	downloadableURL, err := common.DownloadableURL(c.SourcePath)
+	notURL := !strings.HasPrefix(downloadableURL, "http://") && !strings.HasPrefix(downloadableURL, "https://")
+
+	// SourcePath can't be empty and has to be 'downlodable'
+	if err != nil {
+		errs = packer.MultiErrorAppend(
+			errs, fmt.Errorf("source_path is invalid: %s", err))
+	} else if c.SourcePath == "" {
 		errs = packer.MultiErrorAppend(errs, fmt.Errorf("source_path is required"))
+	} else if _, err := os.Stat(c.SourcePath); err != nil && notURL {
+		errs = packer.MultiErrorAppend(
+			errs, fmt.Errorf("source_path is invalid: %s", err))
 	}
+
+	// Set SourcePath to downloadable URL value
+	c.SourcePath = downloadableURL
 
 	validMode := false
 	validModes := []string{

@@ -12,6 +12,7 @@ func TestStepImport_impl(t *testing.T) {
 
 func TestStepImport(t *testing.T) {
 	state := testState(t)
+	state.Put("vm_path", "foo")
 	step := new(StepImport)
 	step.Name = "bar"
 	step.SourcePath = "foo"
