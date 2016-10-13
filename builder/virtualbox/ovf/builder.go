@@ -4,30 +4,141 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"path/filepath"
 	"strings"
 
 	"github.com/mitchellh/multistep"
 	vboxcommon "github.com/mitchellh/packer/builder/virtualbox/common"
 	"github.com/mitchellh/packer/common"
 	"github.com/mitchellh/packer/helper/communicator"
+	"github.com/mitchellh/packer/helper/config"
 	"github.com/mitchellh/packer/packer"
+	"github.com/mitchellh/packer/template/interpolate"
 )
 
 // Builder implements packer.Builder and builds the actual VirtualBox
 // images.
 type Builder struct {
-	config *Config
+	config Config
 	runner multistep.Runner
+}
+
+type Config struct {
+	common.PackerConfig             `mapstructure:",squash"`
+	common.HTTPConfig               `mapstructure:",squash"`
+	OVFConfig                       `mapstructure:",squash"`
+	common.FloppyConfig             `mapstructure:",squash"`
+	vboxcommon.ExportConfig         `mapstructure:",squash"`
+	vboxcommon.ExportOpts           `mapstructure:",squash"`
+	vboxcommon.OutputConfig         `mapstructure:",squash"`
+	vboxcommon.RunConfig            `mapstructure:",squash"`
+	vboxcommon.SSHConfig            `mapstructure:",squash"`
+	vboxcommon.ShutdownConfig       `mapstructure:",squash"`
+	vboxcommon.VBoxManageConfig     `mapstructure:",squash"`
+	vboxcommon.VBoxManagePostConfig `mapstructure:",squash"`
+	vboxcommon.VBoxVersionConfig    `mapstructure:",squash"`
+
+	BootCommand          []string `mapstructure:"boot_command"`
+	GuestAdditionsMode   string   `mapstructure:"guest_additions_mode"`
+	GuestAdditionsPath   string   `mapstructure:"guest_additions_path"`
+	GuestAdditionsURL    string   `mapstructure:"guest_additions_url"`
+	GuestAdditionsSHA256 string   `mapstructure:"guest_additions_sha256"`
+	ImportOpts           string   `mapstructure:"import_opts"`
+	ImportFlags          []string `mapstructure:"import_flags"`
+	VMName               string   `mapstructure:"vm_name"`
+
+	ctx interpolate.Context
 }
 
 // Prepare processes the build configuration parameters.
 func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
-	c, warnings, errs := NewConfig(raws...)
-	if errs != nil {
+	err := config.Decode(&b.config, &config.DecodeOpts{
+		Interpolate:        true,
+		InterpolateContext: &b.config.ctx,
+		InterpolateFilter: &interpolate.RenderFilter{
+			Exclude: []string{
+				"boot_command",
+				"guest_additions_path",
+				"guest_additions_url",
+				"vboxmanage",
+				"vboxmanage_post",
+			},
+		},
+	}, raws...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Accumulate any errors and warnings
+	var errs *packer.MultiError
+	warnings := make([]string, 0)
+
+	ovfWarnings, ovfErrs := b.config.OVFConfig.Prepare(&b.config.ctx)
+	warnings = append(warnings, ovfWarnings...)
+	errs = packer.MultiErrorAppend(errs, ovfErrs...)
+
+	errs = packer.MultiErrorAppend(errs, b.config.ExportConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.ExportOpts.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.FloppyConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.HTTPConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.OutputConfig.Prepare(&b.config.ctx, &b.config.PackerConfig)...)
+	errs = packer.MultiErrorAppend(errs, b.config.RunConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.ShutdownConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.SSHConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.VBoxManageConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.VBoxManagePostConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.VBoxVersionConfig.Prepare(&b.config.ctx)...)
+
+	if b.config.GuestAdditionsMode == "" {
+		b.config.GuestAdditionsMode = "upload"
+	}
+
+	if b.config.GuestAdditionsPath == "" {
+		b.config.GuestAdditionsPath = "VBoxGuestAdditions.iso"
+	}
+
+	if b.config.VMName == "" {
+		b.config.VMName = fmt.Sprintf("packer-%s-%d", b.config.PackerBuildName, interpolate.InitTime.Unix())
+	}
+
+	// TODO: Write a packer fix and just remove import_opts
+	// TODO(arthurb): I'd write a fix for this, but I have no idea what it means
+	if b.config.ImportOpts != "" {
+		b.config.ImportFlags = append(b.config.ImportFlags, "--options", b.config.ImportOpts)
+	}
+
+	validMode := false
+	validModes := []string{
+		vboxcommon.GuestAdditionsModeDisable,
+		vboxcommon.GuestAdditionsModeAttach,
+		vboxcommon.GuestAdditionsModeUpload,
+	}
+
+	for _, mode := range validModes {
+		if b.config.GuestAdditionsMode == mode {
+			validMode = true
+			break
+		}
+	}
+
+	if !validMode {
+		errs = packer.MultiErrorAppend(errs,
+			fmt.Errorf("guest_additions_mode is invalid. Must be one of: %v", validModes))
+	}
+
+	if b.config.GuestAdditionsSHA256 != "" {
+		b.config.GuestAdditionsSHA256 = strings.ToLower(b.config.GuestAdditionsSHA256)
+	}
+
+	// Warnings
+	if b.config.ShutdownCommand == "" {
+		warnings = append(warnings,
+			"A shutdown_command was not specified. Without a shutdown command, Packer\n"+
+				"will forcibly halt the virtual machine, which may result in data loss.")
+	}
+
+	if errs != nil && len(errs.Errors) > 0 {
 		return warnings, errs
 	}
-	b.config = c
 
 	return warnings, nil
 }
@@ -40,18 +151,6 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 	if err != nil {
 		return nil, fmt.Errorf("Failed creating VirtualBox driver: %s", err)
 	}
-
-	// Set up the state.
-	state := new(multistep.BasicStateBag)
-	state.Put("config", b.config)
-	state.Put("debug", b.config.PackerDebug)
-	state.Put("driver", driver)
-	state.Put("cache", cache)
-	state.Put("hook", hook)
-	state.Put("ui", ui)
-
-	// Get extension from SourcePath
-	extension := filepath.Ext(b.config.SourcePath)
 
 	// Build the steps.
 	steps := []multistep.Step{
@@ -76,10 +175,10 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Ctx:                  b.config.ctx,
 		},
 		&common.StepDownload{
-			Checksum:     b.config.OVAChecksum,
-			ChecksumType: b.config.OVAChecksumType,
-			Description:  strings.ToUpper(extension),
-			Extension:    extension,
+			Checksum:     b.config.Checksum,
+			ChecksumType: b.config.ChecksumType,
+			Description:  "OVF/OVA",
+			Extension:    "ova",
 			ResultKey:    "vm_path",
 			TargetPath:   b.config.TargetPath,
 			Url:          []string{b.config.SourcePath},
@@ -149,6 +248,15 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			SkipNatMapping: b.config.SSHSkipNatMapping,
 		},
 	}
+
+	// Set up the state.
+	state := new(multistep.BasicStateBag)
+	state.Put("config", b.config)
+	state.Put("debug", b.config.PackerDebug)
+	state.Put("driver", driver)
+	state.Put("cache", cache)
+	state.Put("hook", hook)
+	state.Put("ui", ui)
 
 	// Run the steps.
 	b.runner = common.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
